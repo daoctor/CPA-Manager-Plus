@@ -34,7 +34,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image
-        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        if: github.event_name != 'push'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -48,7 +48,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         shell: bash
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,7 +56,23 @@ jobs:
           set -euo pipefail
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Build and push image
+      - name: Build and push preview image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/')
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.manager-server
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:preview
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            VERSION=preview
+            SOURCE_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push main image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
