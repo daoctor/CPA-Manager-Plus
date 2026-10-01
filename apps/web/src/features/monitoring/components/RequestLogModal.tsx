@@ -26,32 +26,18 @@ const isNotFoundError = (error: unknown) =>
       Number((error as { status?: unknown }).status) === 404
   );
 
-type RequestLogModalProps = {
-  requestId: string | null;
-  onClose: () => void;
+type RequestLogContentProps = {
+  requestId: string;
 };
 
-export function RequestLogModal({ requestId, onClose }: RequestLogModalProps) {
+function RequestLogContent({ requestId }: RequestLogContentProps) {
   const { t } = useTranslation();
   const [text, setText] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
-
-    if (!requestId) {
-      setText('');
-      setError('');
-      setLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setText('');
-    setError('');
-    setLoading(true);
 
     void logsApi
       .downloadRequestLogById(requestId)
@@ -91,6 +77,41 @@ export function RequestLogModal({ requestId, onClose }: RequestLogModalProps) {
     };
   }, [requestId, t]);
 
+  if (loading) {
+    return <div>{t('common.loading', { defaultValue: 'Loading...' })}</div>;
+  }
+
+  if (error) {
+    return <div role="alert">{error}</div>;
+  }
+
+  return (
+    <pre
+      aria-label={t('monitoring.request_log_title', { defaultValue: 'Request Log' })}
+      tabIndex={0}
+      style={{
+        margin: 0,
+        maxHeight: '70vh',
+        overflow: 'auto',
+        padding: 12,
+        borderRadius: 8,
+        fontSize: 12,
+        lineHeight: 1.5,
+        whiteSpace: 'pre',
+      }}
+    >
+      {text}
+    </pre>
+  );
+}
+
+type RequestLogModalProps = {
+  requestId: string | null;
+  onClose: () => void;
+};
+
+export function RequestLogModal({ requestId, onClose }: RequestLogModalProps) {
+  const { t } = useTranslation();
   const title = requestId
     ? `${t('monitoring.request_log_title', { defaultValue: 'Request Log' })} · ${requestId}`
     : t('monitoring.request_log_title', { defaultValue: 'Request Log' });
@@ -107,28 +128,7 @@ export function RequestLogModal({ requestId, onClose }: RequestLogModalProps) {
         </Button>
       }
     >
-      {loading ? (
-        <div>{t('common.loading', { defaultValue: 'Loading...' })}</div>
-      ) : error ? (
-        <div role="alert">{error}</div>
-      ) : (
-        <pre
-          aria-label={t('monitoring.request_log_title', { defaultValue: 'Request Log' })}
-          tabIndex={0}
-          style={{
-            margin: 0,
-            maxHeight: '70vh',
-            overflow: 'auto',
-            padding: 12,
-            borderRadius: 8,
-            fontSize: 12,
-            lineHeight: 1.5,
-            whiteSpace: 'pre',
-          }}
-        >
-          {text}
-        </pre>
-      )}
+      {requestId ? <RequestLogContent key={requestId} requestId={requestId} /> : null}
     </Modal>
   );
 }
