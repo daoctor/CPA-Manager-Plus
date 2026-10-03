@@ -77,7 +77,7 @@ function StatCard({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className={styles.statCard}>
       <div className={styles.statLabel}>{label}</div>
-      <div className={styles.statValue}>{value || '—'}</div>
+      <div className={styles.statValue}>{value ?? '—'}</div>
     </div>
   );
 }
