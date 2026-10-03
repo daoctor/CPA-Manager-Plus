@@ -18,6 +18,7 @@ import {
   RecentPattern,
 } from '@/features/monitoring/components/MonitoringShared';
 import { MonitoringPanel } from '@/features/monitoring/components/MonitoringPanel';
+import { RequestLogModal } from '@/features/monitoring/components/RequestLogModal';
 import { formatPercent } from '@/features/monitoring/components/accountOverviewPresentation';
 import { buildRealtimeSourceDisplay } from '@/features/monitoring/realtimeSourceDisplay';
 import type { MonitoringEventRow } from '@/features/monitoring/hooks/useMonitoringData';
@@ -1030,6 +1031,7 @@ export function RealtimeEventsPanel({
 }: RealtimeEventsPanelProps) {
   const tooltipIdPrefix = useId();
   const showNotification = useNotificationStore((state) => state.showNotification);
+  const [requestLogId, setRequestLogId] = useState<string | null>(null);
   const sourceApiKeyLabel = shortLabel(
     t,
     'monitoring.column_source_api_key_short',
@@ -1268,6 +1270,22 @@ export function RealtimeEventsPanel({
                             : t('monitoring.result_success')}
                         </span>
                       )}
+                      {row.requestId ? (
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          iconOnly
+                          onClick={() => setRequestLogId(row.requestId ?? null)}
+                          title={t('monitoring.view_request_log', {
+                            defaultValue: 'View request log',
+                          })}
+                          aria-label={t('monitoring.view_request_log', {
+                            defaultValue: 'View request log',
+                          })}
+                        >
+                          <IconEye size={14} aria-hidden="true" />
+                        </Button>
+                      ) : null}
                     </div>
                   </td>
                   <td
@@ -1354,6 +1372,7 @@ export function RealtimeEventsPanel({
         onPageSizeChange={onPageSizeChange}
         t={t}
       />
+      <RequestLogModal requestId={requestLogId} onClose={() => setRequestLogId(null)} />
       {rows.length > 0 ? (
         <div className={styles.loadMoreEventsBar}>
           <span className={styles.loadMoreEventsSummary}>
