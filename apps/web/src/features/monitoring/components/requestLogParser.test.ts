@@ -106,7 +106,7 @@ describe('requestLogParser', () => {
     expect(stream?.content).toBe('Hey!');
     expect(stream?.finishReason).toBe('stop');
     expect(stream?.usage?.totalTokens).toBe(337);
-    expect(stream?.timeline.at(-1)?.event).toBe('done');
+    expect(stream?.timeline[stream.timeline.length - 1]?.event).toBe('done');
   });
 
   it('pretty prints JSON bodies without changing non-JSON text', () => {
