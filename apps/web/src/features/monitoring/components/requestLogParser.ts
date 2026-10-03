@@ -216,7 +216,7 @@ const parseStreamSummary = (body: string): RequestLogStreamSummary | undefined =
 
   const applyPayload = (payload: JsonRecord, eventName: string) => {
     const payloadType = readString(payload.type);
-    const event = payloadType ?? eventName || 'data';
+    const event = payloadType ?? (eventName || 'data');
     const sequenceNumber = readNumber(payload.sequence_number);
 
     if (event === 'response.reasoning_summary_text.delta') {
