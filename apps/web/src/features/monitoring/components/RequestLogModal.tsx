@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
@@ -6,31 +6,25 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/ui/SegmentedTabs';
 import { logsApi } from '@/services/api/logs';
 import {
-  parseRequestLog,
+  parseRequestLogData,
   type ParsedRequestLog,
   type RequestLogAttempt,
   type RequestLogHeader,
   type RequestLogHttpMessage,
-  type RequestLogStreamSummary,
+  type RequestLogReadableRequest,
+  type RequestLogReadableResponse,
   type RequestLogUsage,
 } from './requestLogParser';
 import styles from './RequestLogModal.module.scss';
 
-const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+type RequestLogTab = 'overview' | 'client' | 'upstream' | 'response';
 
-type RequestLogTab = 'overview' | 'client' | 'upstream' | 'response' | 'timeline' | 'raw';
-
-const responseDataToText = async (data: unknown): Promise<string> => {
-  if (data instanceof Blob) return data.text();
-  if (typeof data === 'string') return data;
-  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
-  if (data === null || data === undefined) return '';
-  try {
-    return JSON.stringify(data, null, 2);
-  } catch {
-    return String(data);
-  }
-};
+const TABS: SegmentedTabItem<RequestLogTab>[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'client', label: 'Client Request' },
+  { id: 'upstream', label: 'Upstream' },
+  { id: 'response', label: 'Final Response' },
+];
 
 const isNotFoundError = (error: unknown) =>
   Boolean(
@@ -39,20 +33,6 @@ const isNotFoundError = (error: unknown) =>
       'status' in error &&
       Number((error as { status?: unknown }).status) === 404
   );
-
-const readJsonString = (value: unknown, key: string): string | undefined => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const candidate = (value as Record<string, unknown>)[key];
-  return typeof candidate === 'string' && candidate ? candidate : undefined;
-};
-
-const tryParseBody = (body: string): unknown | undefined => {
-  try {
-    return body.trim() ? (JSON.parse(body) as unknown) : undefined;
-  } catch {
-    return undefined;
-  }
-};
 
 const normalizeTimestamp = (value: string) =>
   value.replace(/(\.\d{3})\d+(?=(?:Z|[+-]\d{2}:\d{2})$)/, '$1');
@@ -98,22 +78,6 @@ function MetaGrid({ values }: { values: Record<string, string> }) {
   );
 }
 
-function CodeBlock({
-  children,
-  raw = false,
-  empty = 'No body',
-}: {
-  children: string;
-  raw?: boolean;
-  empty?: string;
-}) {
-  return (
-    <pre className={raw ? styles.rawCode : styles.codeBlock} tabIndex={0}>
-      {children || empty}
-    </pre>
-  );
-}
-
 function HeadersDetails({ headers }: { headers: RequestLogHeader[] }) {
   if (headers.length === 0) return null;
 
@@ -146,54 +110,94 @@ function UsageGrid({ usage }: { usage?: RequestLogUsage }) {
   );
 }
 
-function StreamPreview({
-  stream,
-  fallback,
-}: {
-  stream?: RequestLogStreamSummary;
-  fallback: string;
-}) {
-  if (!stream) return <CodeBlock>{fallback}</CodeBlock>;
+function RequestPreview({ request }: { request?: RequestLogReadableRequest }) {
+  if (!request) {
+    return <div className={styles.emptyInline}>No readable request body was found.</div>;
+  }
 
-  const hasReadableContent = Boolean(stream.reasoning || stream.content);
+  const parameterEntries = Object.entries(request.parameters);
+
   return (
-    <div className={styles.streamPreview}>
+    <div className={styles.readableBlock}>
       <div className={styles.badges}>
-        {stream.model ? <span className={styles.badge}>Model · {stream.model}</span> : null}
-        {stream.serviceTier ? (
-          <span className={styles.badge}>Tier · {stream.serviceTier}</span>
+        {request.model ? <span className={styles.badge}>Model · {request.model}</span> : null}
+        {request.streaming !== undefined ? (
+          <span className={styles.badge}>Streaming · {request.streaming ? 'Yes' : 'No'}</span>
         ) : null}
-        {stream.finishReason ? (
-          <span className={styles.badge}>Finish · {stream.finishReason}</span>
-        ) : null}
-        <span className={styles.badge}>Streaming</span>
+        {parameterEntries.map(([key, value]) => (
+          <span className={styles.badge} key={key}>
+            {key} · {value}
+          </span>
+        ))}
       </div>
 
-      {stream.reasoning ? (
+      {request.instructions ? (
+        <section className={styles.contentSection}>
+          <div className={styles.contentLabel}>Instructions</div>
+          <div className={styles.readableText}>{request.instructions}</div>
+        </section>
+      ) : null}
+
+      {request.messages.length > 0 ? (
+        <section className={styles.contentSection}>
+          <div className={styles.contentLabel}>Messages</div>
+          <div className={styles.messages}>
+            {request.messages.map((message, index) => (
+              <article className={styles.messageBubble} key={message.role + '-' + index}>
+                <div className={styles.messageRole}>{message.role}</div>
+                <div className={styles.messageText}>{message.content}</div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : (
+        <div className={styles.emptyInline}>No human-readable message content was found.</div>
+      )}
+    </div>
+  );
+}
+
+function ResponsePreview({ response }: { response?: RequestLogReadableResponse }) {
+  if (!response) {
+    return <div className={styles.emptyInline}>No readable response body was found.</div>;
+  }
+
+  return (
+    <div className={styles.readableBlock}>
+      <div className={styles.badges}>
+        {response.model ? <span className={styles.badge}>Model · {response.model}</span> : null}
+        {response.serviceTier ? (
+          <span className={styles.badge}>Tier · {response.serviceTier}</span>
+        ) : null}
+        {response.finishReason ? (
+          <span className={styles.badge}>Finish · {response.finishReason}</span>
+        ) : null}
+      </div>
+
+      {response.reasoning ? (
         <section className={styles.contentSection}>
           <div className={styles.contentLabel}>Reasoning</div>
-          <div className={styles.readableText}>{stream.reasoning}</div>
+          <div className={styles.readableText}>{response.reasoning}</div>
         </section>
       ) : null}
 
-      {stream.content ? (
+      {response.content ? (
         <section className={styles.contentSection}>
-          <div className={styles.contentLabel}>Assistant</div>
-          <div className={styles.readableText}>{stream.content}</div>
+          <div className={styles.contentLabel}>Response</div>
+          <div className={styles.readableText}>{response.content}</div>
         </section>
-      ) : null}
+      ) : (
+        <div className={styles.emptyInline}>No human-readable response text was found.</div>
+      )}
 
-      <UsageGrid usage={stream.usage} />
-
-      {!hasReadableContent ? <CodeBlock>{fallback}</CodeBlock> : null}
+      <UsageGrid usage={response.usage} />
     </div>
   );
 }
 
 function OverviewTab({ trace }: { trace: ParsedRequestLog }) {
   const firstAttempt = trace.attempts[0];
-  const upstreamBody = firstAttempt?.request ? tryParseBody(firstAttempt.request.body) : undefined;
-  const upstreamModel = readJsonString(upstreamBody, 'model');
+  const upstreamModel = firstAttempt?.request?.request?.model;
   const finalStatus = statusLabel(trace.response);
 
   return (
@@ -265,15 +269,18 @@ function ClientRequestTab({ trace }: { trace: ParsedRequestLog }) {
         <MetaGrid values={trace.info} />
       </section>
       <section className={styles.section}>
-        <div className={styles.sectionTitle}>Body</div>
-        <CodeBlock>{trace.requestBodyPretty}</CodeBlock>
+        <div className={styles.sectionTitle}>Client to CPA</div>
+        <HeadersDetails headers={trace.requestHeaders} />
+        <div className={styles.bodySection}>
+          <div className={styles.contentLabel}>Readable request</div>
+          <RequestPreview request={trace.clientRequest} />
+        </div>
       </section>
-      <HeadersDetails headers={trace.requestHeaders} />
     </div>
   );
 }
 
-function MessagePanel({
+function UpstreamMessage({
   title,
   message,
   response = false,
@@ -293,15 +300,17 @@ function MessagePanel({
         ) : null}
       </div>
       <MetaGrid values={message.meta} />
-      <div className={styles.messageBody}>
-        <div className={styles.contentLabel}>Body</div>
+      <HeadersDetails headers={message.headers} />
+      <div className={styles.bodySection}>
+        <div className={styles.contentLabel}>
+          {response ? 'Readable response' : 'Readable request'}
+        </div>
         {response ? (
-          <StreamPreview stream={message.stream} fallback={message.prettyBody} />
+          <ResponsePreview response={message.response} />
         ) : (
-          <CodeBlock>{message.prettyBody}</CodeBlock>
+          <RequestPreview request={message.request} />
         )}
       </div>
-      <HeadersDetails headers={message.headers} />
     </section>
   );
 }
@@ -325,8 +334,8 @@ function UpstreamTab({ trace }: { trace: ParsedRequestLog }) {
               <span>{formatDuration(durationMs(attempt))}</span>
             </div>
           </div>
-          <MessagePanel title="Upstream request" message={attempt.request} />
-          <MessagePanel title="Upstream response" message={attempt.response} response />
+          <UpstreamMessage title="CPA to Upstream" message={attempt.request} />
+          <UpstreamMessage title="Upstream to CPA" message={attempt.response} response />
         </section>
       ))}
     </div>
@@ -337,55 +346,22 @@ function FinalResponseTab({ trace }: { trace: ParsedRequestLog }) {
   if (!trace.response) {
     return <div className={styles.emptyState}>No final client response was found in this log.</div>;
   }
-  return (
-    <div className={styles.tabContent}>
-      <MessagePanel title="CPA → Client" message={trace.response} response />
-    </div>
-  );
-}
-
-function TimelineGroup({ title, stream }: { title: string; stream?: RequestLogStreamSummary }) {
-  if (!stream || stream.timeline.length === 0) return null;
-
-  return (
-    <section className={styles.section}>
-      <div className={styles.sectionTitle}>{title}</div>
-      <div className={styles.timeline}>
-        {stream.timeline.map((item, index) => (
-          <div className={styles.timelineItem} key={item.event + '-' + index}>
-            <span className={styles.timelineIndex}>
-              {item.sequenceNumber !== undefined ? '#' + item.sequenceNumber : '•'}
-            </span>
-            <div>
-              <strong>{item.event}</strong>
-              {item.detail ? <span>{item.detail}</span> : null}
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function TimelineTab({ trace }: { trace: ParsedRequestLog }) {
-  const hasTimeline =
-    trace.attempts.some((attempt) => Boolean(attempt.response?.stream?.timeline.length)) ||
-    Boolean(trace.response?.stream?.timeline.length);
-
-  if (!hasTimeline) {
-    return <div className={styles.emptyState}>No streaming event timeline was found.</div>;
-  }
 
   return (
     <div className={styles.tabContent}>
-      {trace.attempts.map((attempt) => (
-        <TimelineGroup
-          key={attempt.index}
-          title={'Attempt ' + attempt.index + ' · upstream stream'}
-          stream={attempt.response?.stream}
-        />
-      ))}
-      <TimelineGroup title="Final client stream" stream={trace.response?.stream} />
+      <section className={styles.messagePanel}>
+        <div className={styles.messageHeader}>
+          <strong>CPA to Client</strong>
+          {trace.response.meta.Status ? (
+            <span className={styles.statusBadge}>HTTP {trace.response.meta.Status}</span>
+          ) : null}
+        </div>
+        <HeadersDetails headers={trace.response.headers} />
+        <div className={styles.bodySection}>
+          <div className={styles.contentLabel}>Readable response</div>
+          <ResponsePreview response={trace.response.response} />
+        </div>
+      </section>
     </div>
   );
 }
@@ -396,7 +372,7 @@ type RequestLogViewerProps = {
 
 function RequestLogViewer({ requestId }: RequestLogViewerProps) {
   const { t } = useTranslation();
-  const [text, setText] = useState('');
+  const [trace, setTrace] = useState<ParsedRequestLog | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<RequestLogTab>('overview');
@@ -407,17 +383,8 @@ function RequestLogViewer({ requestId }: RequestLogViewerProps) {
     void logsApi
       .downloadRequestLogById(requestId)
       .then(async (response) => {
-        if (cancelled) return;
-        if (response.data instanceof Blob && response.data.size > MAX_PREVIEW_BYTES) {
-          setError(
-            t('monitoring.request_log_too_large', {
-              defaultValue: 'Request log is too large to preview.',
-            })
-          );
-          return;
-        }
-        const nextText = await responseDataToText(response.data);
-        if (!cancelled) setText(nextText);
+        const parsed = await parseRequestLogData(response.data);
+        if (!cancelled) setTrace(parsed);
       })
       .catch((loadError: unknown) => {
         if (cancelled) return;
@@ -442,19 +409,6 @@ function RequestLogViewer({ requestId }: RequestLogViewerProps) {
     };
   }, [requestId, t]);
 
-  const trace = useMemo(() => (text ? parseRequestLog(text) : null), [text]);
-  const tabs = useMemo<SegmentedTabItem<RequestLogTab>[]>(
-    () => [
-      { id: 'overview', label: 'Overview' },
-      { id: 'client', label: 'Client Request' },
-      { id: 'upstream', label: 'Upstream' },
-      { id: 'response', label: 'Final Response' },
-      { id: 'timeline', label: 'Timeline' },
-      { id: 'raw', label: 'Raw' },
-    ],
-    []
-  );
-
   if (loading) {
     return (
       <div className={styles.loadingState}>
@@ -475,7 +429,7 @@ function RequestLogViewer({ requestId }: RequestLogViewerProps) {
   return (
     <div className={styles.viewer}>
       <SegmentedTabs
-        items={tabs}
+        items={TABS}
         activeTab={activeTab}
         onChange={setActiveTab}
         ariaLabel="Request log view"
@@ -487,8 +441,6 @@ function RequestLogViewer({ requestId }: RequestLogViewerProps) {
       {activeTab === 'client' ? <ClientRequestTab trace={trace} /> : null}
       {activeTab === 'upstream' ? <UpstreamTab trace={trace} /> : null}
       {activeTab === 'response' ? <FinalResponseTab trace={trace} /> : null}
-      {activeTab === 'timeline' ? <TimelineTab trace={trace} /> : null}
-      {activeTab === 'raw' ? <CodeBlock raw>{trace.raw}</CodeBlock> : null}
     </div>
   );
 }
