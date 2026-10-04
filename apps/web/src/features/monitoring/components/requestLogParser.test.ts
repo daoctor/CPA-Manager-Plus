@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseRequestLog, prettyPrintRequestLogBody } from './requestLogParser';
+import { humanizeRequestBody, humanizeResponseBody, parseRequestLog, parseRequestLogData } from './requestLogParser';
 
 const sample = [
   '=== REQUEST INFO ===',
@@ -72,6 +72,7 @@ describe('requestLogParser', () => {
     });
     expect(trace.requestedModel).toBe('grok-test');
     expect(trace.streaming).toBe(true);
+    expect(trace.clientRequest.messages).toEqual([{ role: 'user', content: 'hi' }]);
     expect(trace.attempts).toHaveLength(1);
     expect(trace.attempts[0]?.request?.meta['Upstream URL']).toBe(
       'https://example.test/v1/responses'
@@ -81,7 +82,7 @@ describe('requestLogParser', () => {
   });
 
   it('reconstructs Responses API SSE into readable reasoning and assistant text', () => {
-    const stream = parseRequestLog(sample).attempts[0]?.response?.stream;
+    const stream = parseRequestLog(sample).attempts[0]?.response?.response;
 
     expect(stream?.reasoning).toBe('The user sent a greeting.');
     expect(stream?.content).toBe('Hey!');
@@ -94,25 +95,43 @@ describe('requestLogParser', () => {
       reasoningTokens: 140,
       totalTokens: 337,
     });
-    expect(stream?.timeline.map((item) => item.event)).toContain(
-      'response.output_text.delta'
-    );
   });
 
   it('reconstructs OpenAI-compatible chat completion SSE', () => {
-    const stream = parseRequestLog(sample).response?.stream;
+    const stream = parseRequestLog(sample).response?.response;
 
     expect(stream?.reasoning).toBe('The user sent a greeting.');
     expect(stream?.content).toBe('Hey!');
     expect(stream?.finishReason).toBe('stop');
     expect(stream?.usage?.totalTokens).toBe(337);
-    expect(stream?.timeline[stream.timeline.length - 1]?.event).toBe('done');
   });
 
-  it('pretty prints JSON bodies without changing non-JSON text', () => {
-    expect(prettyPrintRequestLogBody('{"a":1,"b":{"c":2}}')).toBe(
-      ['{', '  "a": 1,', '  "b": {', '    "c": 2', '  }', '}'].join('\n')
-    );
-    expect(prettyPrintRequestLogBody('not-json')).toBe('not-json');
+  it('humanizes request and response JSON', () => {
+    expect(
+      humanizeRequestBody(
+        '{"model":"gpt-test","messages":[{"role":"system","content":"Be concise"},{"role":"user","content":"Hello"}]}'
+      ).messages
+    ).toEqual([
+      { role: 'system', content: 'Be concise' },
+      { role: 'user', content: 'Hello' },
+    ]);
+
+    expect(
+      humanizeResponseBody(
+        '{"model":"gpt-test","choices":[{"message":{"role":"assistant","content":"Hi there"},"finish_reason":"stop"}]}'
+      )
+    ).toMatchObject({
+      model: 'gpt-test',
+      content: 'Hi there',
+      finishReason: 'stop',
+    });
+  });
+
+  it('parses Blob data without a size cutoff', async () => {
+    if (typeof Blob === 'undefined' || typeof Blob.prototype.stream !== 'function') return;
+
+    const trace = await parseRequestLogData(new Blob([sample]));
+    expect(trace.response?.response?.content).toBe('Hey!');
+    expect(trace.clientRequest.messages[0]?.content).toBe('hi');
   });
 });
