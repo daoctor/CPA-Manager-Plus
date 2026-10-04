@@ -334,8 +334,6 @@ export const humanizeResponseBody = (body: string): RequestLogReadableResponse =
 
   let reasoning = '';
   let content = '';
-  let finishReason: string | undefined;
-
   const responses = extractResponsesOutput(root);
   reasoning += responses.reasoning;
   content += responses.content;
@@ -347,7 +345,7 @@ export const humanizeResponseBody = (body: string): RequestLogReadableResponse =
     reasoning = appendText(reasoning, message.reasoning_content);
     content = appendText(content, message.content);
   }
-  finishReason = readString(firstChoice?.finish_reason);
+  const finishReason = readString(firstChoice?.finish_reason);
 
   const anthropic = extractAnthropicContent(root);
   reasoning += anthropic.reasoning;
