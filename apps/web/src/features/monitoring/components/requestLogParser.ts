@@ -13,28 +13,33 @@ export type RequestLogUsage = {
   totalTokens?: number;
 };
 
-export type RequestLogTimelineItem = {
-  event: string;
-  sequenceNumber?: number;
-  detail?: string;
+export type RequestLogReadableMessage = {
+  role: string;
+  content: string;
 };
 
-export type RequestLogStreamSummary = {
+export type RequestLogReadableRequest = {
+  model?: string;
+  streaming?: boolean;
+  instructions?: string;
+  messages: RequestLogReadableMessage[];
+  parameters: Record<string, string>;
+};
+
+export type RequestLogReadableResponse = {
   model?: string;
   serviceTier?: string;
   reasoning: string;
   content: string;
   finishReason?: string;
   usage?: RequestLogUsage;
-  timeline: RequestLogTimelineItem[];
 };
 
 export type RequestLogHttpMessage = {
   meta: Record<string, string>;
   headers: RequestLogHeader[];
-  body: string;
-  prettyBody: string;
-  stream?: RequestLogStreamSummary;
+  request?: RequestLogReadableRequest;
+  response?: RequestLogReadableResponse;
 };
 
 export type RequestLogAttempt = {
@@ -46,15 +51,17 @@ export type RequestLogAttempt = {
 export type ParsedRequestLog = {
   info: Record<string, string>;
   requestHeaders: RequestLogHeader[];
-  requestBody: string;
-  requestBodyPretty: string;
-  requestBodyJson?: unknown;
+  clientRequest: RequestLogReadableRequest;
   requestedModel?: string;
   streaming?: boolean;
   attempts: RequestLogAttempt[];
   response?: RequestLogHttpMessage;
-  raw: string;
 };
+
+const emptyRequest = (): RequestLogReadableRequest => ({
+  messages: [],
+  parameters: {},
+});
 
 const asRecord = (value: unknown): JsonRecord | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -85,33 +92,20 @@ const tryParseJson = (value: string): unknown | undefined => {
   }
 };
 
-export const prettyPrintRequestLogBody = (value: string): string => {
-  const parsed = tryParseJson(value);
-  return parsed === undefined ? value : JSON.stringify(parsed, null, 2);
+const setKeyValue = (target: Record<string, string>, line: string) => {
+  const separator = line.indexOf(':');
+  if (separator <= 0) return;
+  const key = line.slice(0, separator).trim();
+  const value = line.slice(separator + 1).trim();
+  if (key) target[key] = value;
 };
 
-const parseKeyValueLines = (value: string): Record<string, string> => {
-  const result: Record<string, string> = {};
-  for (const line of value.split('\n')) {
-    const separator = line.indexOf(':');
-    if (separator <= 0) continue;
-    const key = line.slice(0, separator).trim();
-    const entryValue = line.slice(separator + 1).trim();
-    if (key) result[key] = entryValue;
-  }
-  return result;
-};
-
-const parseHeaderLines = (value: string): RequestLogHeader[] => {
-  const headers: RequestLogHeader[] = [];
-  for (const line of value.split('\n')) {
-    const separator = line.indexOf(':');
-    if (separator <= 0) continue;
-    const name = line.slice(0, separator).trim();
-    const headerValue = line.slice(separator + 1).trim();
-    if (name) headers.push({ name, value: headerValue });
-  }
-  return headers;
+const pushHeader = (target: RequestLogHeader[], line: string) => {
+  const separator = line.indexOf(':');
+  if (separator <= 0) return;
+  const name = line.slice(0, separator).trim();
+  const value = line.slice(separator + 1).trim();
+  if (name) target.push({ name, value });
 };
 
 const normalizeUsage = (value: unknown): RequestLogUsage | undefined => {
@@ -133,6 +127,132 @@ const normalizeUsage = (value: unknown): RequestLogUsage | undefined => {
   return Object.values(normalized).some((entry) => entry !== undefined) ? normalized : undefined;
 };
 
+const extractText = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (!value) return '';
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => extractText(entry))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  const record = asRecord(value);
+  if (!record) return '';
+
+  for (const key of ['text', 'input_text', 'output_text']) {
+    const text = readString(record[key]);
+    if (text) return text;
+  }
+
+  if (record.content !== undefined) return extractText(record.content);
+  if (record.parts !== undefined) return extractText(record.parts);
+
+  const type = readString(record.type);
+  if (type && ['image', 'image_url', 'input_image'].includes(type)) return '[image]';
+
+  return '';
+};
+
+const pushMessage = (
+  messages: RequestLogReadableMessage[],
+  role: unknown,
+  content: unknown,
+  fallbackRole = 'message'
+) => {
+  const text = extractText(content).trim();
+  if (!text) return;
+  messages.push({
+    role: readString(role) ?? fallbackRole,
+    content: text,
+  });
+};
+
+const scalarValue = (value: unknown): string | undefined => {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return undefined;
+};
+
+const REQUEST_CONTENT_KEYS = new Set([
+  'messages',
+  'input',
+  'prompt',
+  'contents',
+  'instructions',
+  'tools',
+  'metadata',
+  'model',
+  'stream',
+]);
+
+export const humanizeRequestBody = (body: string): RequestLogReadableRequest => {
+  const trimmed = body.trim();
+  if (!trimmed) return emptyRequest();
+
+  const parsed = tryParseJson(trimmed);
+  const root = asRecord(parsed);
+  if (!root) {
+    return {
+      messages: [{ role: 'body', content: trimmed }],
+      parameters: {},
+    };
+  }
+
+  const messages: RequestLogReadableMessage[] = [];
+
+  if (Array.isArray(root.messages)) {
+    for (const item of root.messages) {
+      const message = asRecord(item);
+      if (message) pushMessage(messages, message.role, message.content);
+    }
+  }
+
+  if (Array.isArray(root.input)) {
+    for (const item of root.input) {
+      const message = asRecord(item);
+      if (message) {
+        pushMessage(
+          messages,
+          message.role,
+          message.content ?? message.input,
+          readString(message.type) ?? 'input'
+        );
+      }
+    }
+  } else if (typeof root.input === 'string') {
+    pushMessage(messages, 'input', root.input);
+  }
+
+  if (Array.isArray(root.contents)) {
+    for (const item of root.contents) {
+      const message = asRecord(item);
+      if (message) pushMessage(messages, message.role, message.parts ?? message.content, 'user');
+    }
+  }
+
+  if (messages.length === 0 && root.prompt !== undefined) {
+    pushMessage(messages, 'prompt', root.prompt);
+  }
+
+  const parameters: Record<string, string> = {};
+  for (const [key, value] of Object.entries(root)) {
+    if (REQUEST_CONTENT_KEYS.has(key)) continue;
+    const scalar = scalarValue(value);
+    if (scalar !== undefined) parameters[key] = scalar;
+  }
+
+  return {
+    model: readString(root.model),
+    streaming: typeof root.stream === 'boolean' ? root.stream : undefined,
+    instructions: readString(root.instructions),
+    messages,
+    parameters,
+  };
+};
+
 const appendText = (current: string, next: unknown) =>
   typeof next === 'string' ? current + next : current;
 
@@ -147,7 +267,7 @@ const readChoiceDelta = (payload: JsonRecord) => {
   };
 };
 
-const extractCompletedOutput = (response: JsonRecord) => {
+const extractResponsesOutput = (response: JsonRecord) => {
   let reasoning = '';
   let content = '';
   const output = Array.isArray(response.output) ? response.output : [];
@@ -176,245 +296,413 @@ const extractCompletedOutput = (response: JsonRecord) => {
   return { reasoning, content };
 };
 
-const summarizeTimelinePayload = (payload: JsonRecord): string | undefined => {
-  const delta = readString(payload.delta);
-  if (delta !== undefined) {
-    return delta.length > 80 ? 'delta · ' + delta.slice(0, 77) + '…' : 'delta · ' + delta;
+const extractAnthropicContent = (root: JsonRecord) => {
+  let reasoning = '';
+  let content = '';
+  const blocks = Array.isArray(root.content) ? root.content : [];
+
+  for (const rawBlock of blocks) {
+    const block = asRecord(rawBlock);
+    if (!block) continue;
+    const text = readString(block.text);
+    if (!text) continue;
+    if (block.type === 'thinking') reasoning += text;
+    if (block.type === 'text') content += text;
   }
 
-  const choice = readChoiceDelta(payload);
-  if (choice.content) {
-    return choice.content.length > 80
-      ? 'content · ' + choice.content.slice(0, 77) + '…'
-      : 'content · ' + choice.content;
-  }
-  if (choice.reasoning) {
-    return choice.reasoning.length > 80
-      ? 'reasoning · ' + choice.reasoning.slice(0, 77) + '…'
-      : 'reasoning · ' + choice.reasoning;
-  }
-  if (choice.finishReason) return 'finish · ' + choice.finishReason;
-
-  const response = asRecord(payload.response);
-  const status = readString(response?.status) ?? readString(payload.status);
-  return status ? 'status · ' + status : undefined;
+  return { reasoning, content };
 };
 
-const parseStreamSummary = (body: string): RequestLogStreamSummary | undefined => {
-  const lines = body.replace(/\r\n/g, '\n').split('\n');
-  const hasSse = lines.some(
-    (line) => line.startsWith('data:') || line.startsWith('event:') || line.startsWith(': xai-usage ')
-  );
-  if (!hasSse) return undefined;
+const extractGeminiContent = (root: JsonRecord): string => {
+  const candidates = Array.isArray(root.candidates) ? root.candidates : [];
+  const first = asRecord(candidates[0]);
+  const content = asRecord(first?.content);
+  return extractText(content?.parts);
+};
 
-  const summary: RequestLogStreamSummary = {
+export const humanizeResponseBody = (body: string): RequestLogReadableResponse => {
+  const trimmed = body.trim();
+  const parsed = tryParseJson(trimmed);
+  const root = asRecord(parsed);
+
+  if (!root) {
+    return {
+      reasoning: '',
+      content: trimmed,
+    };
+  }
+
+  let reasoning = '';
+  let content = '';
+  let finishReason: string | undefined;
+
+  const responses = extractResponsesOutput(root);
+  reasoning += responses.reasoning;
+  content += responses.content;
+
+  const choices = Array.isArray(root.choices) ? root.choices : [];
+  const firstChoice = asRecord(choices[0]);
+  const message = asRecord(firstChoice?.message);
+  if (message) {
+    reasoning = appendText(reasoning, message.reasoning_content);
+    content = appendText(content, message.content);
+  }
+  finishReason = readString(firstChoice?.finish_reason);
+
+  const anthropic = extractAnthropicContent(root);
+  reasoning += anthropic.reasoning;
+  content += anthropic.content;
+
+  if (!content) content = extractGeminiContent(root);
+  if (!content) content = readString(root.output_text) ?? readString(root.text) ?? '';
+
+  const error = asRecord(root.error);
+  if (!content && error) content = readString(error.message) ?? '';
+
+  return {
+    model: readString(root.model),
+    serviceTier: readString(root.service_tier),
+    reasoning,
+    content,
+    finishReason,
+    usage: normalizeUsage(root.usage),
+  };
+};
+
+class StreamSummaryBuilder {
+  private currentEvent = '';
+
+  readonly summary: RequestLogReadableResponse = {
     reasoning: '',
     content: '',
-    timeline: [],
-  };
-  let currentEvent = '';
-
-  const applyPayload = (payload: JsonRecord, eventName: string) => {
-    const payloadType = readString(payload.type);
-    const event = payloadType ?? (eventName || 'data');
-    const sequenceNumber = readNumber(payload.sequence_number);
-
-    if (event === 'response.reasoning_summary_text.delta') {
-      summary.reasoning = appendText(summary.reasoning, payload.delta);
-    } else if (event === 'response.output_text.delta') {
-      summary.content = appendText(summary.content, payload.delta);
-    } else {
-      const choice = readChoiceDelta(payload);
-      if (choice.reasoning) summary.reasoning += choice.reasoning;
-      if (choice.content) summary.content += choice.content;
-      if (choice.finishReason) summary.finishReason = choice.finishReason;
-    }
-
-    const response = asRecord(payload.response);
-    summary.model =
-      readString(payload.model) ?? readString(response?.model) ?? summary.model;
-    summary.serviceTier =
-      readString(payload.service_tier) ?? readString(response?.service_tier) ?? summary.serviceTier;
-
-    const directUsage = normalizeUsage(payload.usage);
-    const responseUsage = normalizeUsage(response?.usage);
-    if (directUsage || responseUsage) summary.usage = responseUsage ?? directUsage;
-
-    if (event === 'response.completed' && response) {
-      const completed = extractCompletedOutput(response);
-      if (!summary.reasoning && completed.reasoning) summary.reasoning = completed.reasoning;
-      if (!summary.content && completed.content) summary.content = completed.content;
-    }
-
-    summary.timeline.push({
-      event,
-      sequenceNumber,
-      detail: summarizeTimelinePayload(payload),
-    });
   };
 
-  for (const line of lines) {
+  consume(line: string) {
     if (!line) {
-      currentEvent = '';
-      continue;
+      this.currentEvent = '';
+      return;
     }
 
     if (line.startsWith('event:')) {
-      currentEvent = line.slice('event:'.length).trim();
-      continue;
+      this.currentEvent = line.slice('event:'.length).trim();
+      return;
     }
 
     if (line.startsWith(': xai-usage ')) {
-      const parsed = tryParseJson(line.slice(': xai-usage '.length));
-      const usage = normalizeUsage(parsed);
-      if (usage) summary.usage = usage;
-      summary.timeline.push({ event: 'xai-usage', detail: 'usage update' });
-      continue;
+      const usage = normalizeUsage(tryParseJson(line.slice(': xai-usage '.length)));
+      if (usage) this.summary.usage = usage;
+      return;
     }
 
-    if (!line.startsWith('data:')) continue;
+    if (!line.startsWith('data:')) return;
 
     const data = line.slice('data:'.length).trim();
     if (data === '[DONE]') {
-      summary.timeline.push({ event: 'done' });
-      currentEvent = '';
-      continue;
+      this.currentEvent = '';
+      return;
     }
 
-    const parsed = asRecord(tryParseJson(data));
-    if (parsed) applyPayload(parsed, currentEvent);
-    currentEvent = '';
-  }
-
-  return summary;
-};
-
-const parseApiMessage = (value: string): RequestLogHttpMessage => {
-  const metaLines: string[] = [];
-  const headerLines: string[] = [];
-  const bodyLines: string[] = [];
-  let state: 'meta' | 'headers' | 'body' = 'meta';
-
-  for (const line of value.split('\n')) {
-    if (line.trim() === 'Headers:') {
-      state = 'headers';
-      continue;
+    const payload = asRecord(tryParseJson(data));
+    if (!payload) {
+      this.currentEvent = '';
+      return;
     }
-    if (line.trim() === 'Body:') {
-      state = 'body';
-      continue;
+
+    const event = readString(payload.type) ?? this.currentEvent;
+    if (event === 'response.reasoning_summary_text.delta') {
+      this.summary.reasoning = appendText(this.summary.reasoning, payload.delta);
+    } else if (event === 'response.output_text.delta') {
+      this.summary.content = appendText(this.summary.content, payload.delta);
+    } else {
+      const choice = readChoiceDelta(payload);
+      if (choice.reasoning) this.summary.reasoning += choice.reasoning;
+      if (choice.content) this.summary.content += choice.content;
+      if (choice.finishReason) this.summary.finishReason = choice.finishReason;
     }
-    if (state === 'meta') metaLines.push(line);
-    if (state === 'headers') headerLines.push(line);
-    if (state === 'body') bodyLines.push(line);
+
+    const response = asRecord(payload.response);
+    this.summary.model =
+      readString(payload.model) ?? readString(response?.model) ?? this.summary.model;
+    this.summary.serviceTier =
+      readString(payload.service_tier) ??
+      readString(response?.service_tier) ??
+      this.summary.serviceTier;
+
+    const usage = normalizeUsage(response?.usage) ?? normalizeUsage(payload.usage);
+    if (usage) this.summary.usage = usage;
+
+    if (event === 'response.completed' && response) {
+      const completed = extractResponsesOutput(response);
+      if (!this.summary.reasoning && completed.reasoning) this.summary.reasoning = completed.reasoning;
+      if (!this.summary.content && completed.content) this.summary.content = completed.content;
+    }
+
+    this.currentEvent = '';
+  }
+}
+
+type MessageBuilderMode = 'request' | 'response' | 'final-response';
+
+class MessageBuilder {
+  readonly meta: Record<string, string> = {};
+  readonly headers: RequestLogHeader[] = [];
+  private state: 'meta' | 'headers' | 'body' = 'meta';
+  private bodyLines: string[] = [];
+  private stream?: StreamSummaryBuilder;
+
+  constructor(private readonly mode: MessageBuilderMode) {}
+
+  consume(line: string) {
+    if (this.mode === 'final-response' && this.state === 'meta') {
+      if (!line) {
+        this.state = 'body';
+        return;
+      }
+
+      if (line.startsWith('Status:')) {
+        setKeyValue(this.meta, line);
+      } else {
+        pushHeader(this.headers, line);
+      }
+      return;
+    }
+
+    if (line === 'Headers:') {
+      this.state = 'headers';
+      return;
+    }
+
+    if (line === 'Body:') {
+      this.state = 'body';
+      return;
+    }
+
+    if (this.state === 'meta') {
+      if (line) setKeyValue(this.meta, line);
+      return;
+    }
+
+    if (this.state === 'headers') {
+      if (line) pushHeader(this.headers, line);
+      return;
+    }
+
+    if (this.mode !== 'request' && this.looksLikeStreamLine(line)) {
+      if (!this.stream) {
+        this.stream = new StreamSummaryBuilder();
+        for (const buffered of this.bodyLines) this.stream.consume(buffered);
+        this.bodyLines = [];
+      }
+      this.stream.consume(line);
+      return;
+    }
+
+    if (this.stream) {
+      this.stream.consume(line);
+      return;
+    }
+
+    this.bodyLines.push(line);
   }
 
-  const body = bodyLines.join('\n').trim();
-  return {
-    meta: parseKeyValueLines(metaLines.join('\n')),
-    headers: parseHeaderLines(headerLines.join('\n')),
-    body,
-    prettyBody: prettyPrintRequestLogBody(body),
-    stream: parseStreamSummary(body),
-  };
-};
+  finish(): RequestLogHttpMessage {
+    const body = this.bodyLines.join('\n').trim();
 
-const parseFinalResponse = (value: string): RequestLogHttpMessage => {
-  const separator = value.indexOf('\n\n');
-  const head = separator >= 0 ? value.slice(0, separator) : value;
-  const body = separator >= 0 ? value.slice(separator + 2).trim() : '';
-  const lines = head.split('\n');
-  const statusLine = lines.shift() ?? '';
+    if (this.mode === 'request') {
+      return {
+        meta: this.meta,
+        headers: this.headers,
+        request: humanizeRequestBody(body),
+      };
+    }
 
-  return {
-    meta: parseKeyValueLines(statusLine),
-    headers: parseHeaderLines(lines.join('\n')),
-    body,
-    prettyBody: prettyPrintRequestLogBody(body),
-    stream: parseStreamSummary(body),
-  };
-};
-
-type RawSection = {
-  name: string;
-  content: string;
-};
-
-const splitSections = (raw: string): RawSection[] => {
-  const normalized = raw.replace(/\r\n/g, '\n');
-  const pattern = /^=== (.+?) ===\s*$/gm;
-  const matches = Array.from(normalized.matchAll(pattern));
-  const sections: RawSection[] = [];
-
-  for (let index = 0; index < matches.length; index += 1) {
-    const match = matches[index];
-    const start = (match.index ?? 0) + match[0].length;
-    const end = index + 1 < matches.length ? (matches[index + 1].index ?? normalized.length) : normalized.length;
-    sections.push({
-      name: match[1].trim(),
-      content: normalized.slice(start, end).replace(/^\n+|\n+$/g, ''),
-    });
+    return {
+      meta: this.meta,
+      headers: this.headers,
+      response: this.stream?.summary ?? humanizeResponseBody(body),
+    };
   }
 
-  return sections;
-};
+  private looksLikeStreamLine(line: string) {
+    if (
+      line.startsWith('event:') ||
+      line.startsWith('data:') ||
+      line.startsWith(': xai-usage ')
+    ) {
+      return true;
+    }
 
-export const parseRequestLog = (raw: string): ParsedRequestLog => {
-  const trace: ParsedRequestLog = {
+    return this.headers.some(
+      (header) =>
+        header.name.toLowerCase() === 'content-type' &&
+        header.value.toLowerCase().includes('text/event-stream')
+    );
+  }
+}
+
+class IncrementalRequestLogParser {
+  private buffer = '';
+  private currentSection = '';
+  private sectionLines: string[] = [];
+  private messageBuilder?: MessageBuilder;
+  private currentAttempt?: number;
+
+  private readonly trace: ParsedRequestLog = {
     info: {},
     requestHeaders: [],
-    requestBody: '',
-    requestBodyPretty: '',
+    clientRequest: emptyRequest(),
     attempts: [],
-    raw,
   };
 
-  const attempts = new Map<number, RequestLogAttempt>();
+  private readonly attempts = new Map<number, RequestLogAttempt>();
 
-  for (const section of splitSections(raw)) {
-    if (section.name === 'REQUEST INFO') {
-      trace.info = parseKeyValueLines(section.content);
-      continue;
-    }
+  push(chunk: string) {
+    this.buffer += chunk;
 
-    if (section.name === 'HEADERS') {
-      trace.requestHeaders = parseHeaderLines(section.content);
-      continue;
-    }
-
-    if (section.name === 'REQUEST BODY') {
-      trace.requestBody = section.content.trim();
-      trace.requestBodyPretty = prettyPrintRequestLogBody(trace.requestBody);
-      trace.requestBodyJson = tryParseJson(trace.requestBody);
-      const requestBody = asRecord(trace.requestBodyJson);
-      trace.requestedModel = readString(requestBody?.model);
-      trace.streaming = typeof requestBody?.stream === 'boolean' ? requestBody.stream : undefined;
-      continue;
-    }
-
-    const apiRequestMatch = /^API REQUEST (\d+)$/.exec(section.name);
-    if (apiRequestMatch) {
-      const attemptIndex = Number(apiRequestMatch[1]);
-      const attempt = attempts.get(attemptIndex) ?? { index: attemptIndex };
-      attempt.request = parseApiMessage(section.content);
-      attempts.set(attemptIndex, attempt);
-      continue;
-    }
-
-    const apiResponseMatch = /^API RESPONSE (\d+)$/.exec(section.name);
-    if (apiResponseMatch) {
-      const attemptIndex = Number(apiResponseMatch[1]);
-      const attempt = attempts.get(attemptIndex) ?? { index: attemptIndex };
-      attempt.response = parseApiMessage(section.content);
-      attempts.set(attemptIndex, attempt);
-      continue;
-    }
-
-    if (section.name === 'RESPONSE') {
-      trace.response = parseFinalResponse(section.content);
+    while (true) {
+      const newline = this.buffer.indexOf('\n');
+      if (newline < 0) break;
+      const rawLine = this.buffer.slice(0, newline);
+      this.buffer = this.buffer.slice(newline + 1);
+      this.consumeLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
     }
   }
 
-  trace.attempts = Array.from(attempts.values()).sort((a, b) => a.index - b.index);
-  return trace;
+  finish(): ParsedRequestLog {
+    if (this.buffer) {
+      const line = this.buffer.endsWith('\r') ? this.buffer.slice(0, -1) : this.buffer;
+      this.consumeLine(line);
+      this.buffer = '';
+    }
+
+    this.finishSection();
+    this.trace.attempts = Array.from(this.attempts.values()).sort((a, b) => a.index - b.index);
+    this.trace.requestedModel = this.trace.clientRequest.model;
+    this.trace.streaming = this.trace.clientRequest.streaming;
+    return this.trace;
+  }
+
+  private consumeLine(line: string) {
+    const sectionMatch = /^=== (.+?) ===\s*$/.exec(line);
+    if (sectionMatch) {
+      this.finishSection();
+      this.startSection(sectionMatch[1].trim());
+      return;
+    }
+
+    if (!this.currentSection) return;
+
+    if (this.messageBuilder) {
+      this.messageBuilder.consume(line);
+      return;
+    }
+
+    if (this.currentSection === 'REQUEST INFO') {
+      if (line) setKeyValue(this.trace.info, line);
+      return;
+    }
+
+    if (this.currentSection === 'HEADERS') {
+      if (line) pushHeader(this.trace.requestHeaders, line);
+      return;
+    }
+
+    this.sectionLines.push(line);
+  }
+
+  private startSection(name: string) {
+    this.currentSection = name;
+    this.sectionLines = [];
+    this.currentAttempt = undefined;
+    this.messageBuilder = undefined;
+
+    const requestMatch = /^API REQUEST (\d+)$/.exec(name);
+    if (requestMatch) {
+      this.currentAttempt = Number(requestMatch[1]);
+      this.messageBuilder = new MessageBuilder('request');
+      return;
+    }
+
+    const responseMatch = /^API RESPONSE (\d+)$/.exec(name);
+    if (responseMatch) {
+      this.currentAttempt = Number(responseMatch[1]);
+      this.messageBuilder = new MessageBuilder('response');
+      return;
+    }
+
+    if (name === 'RESPONSE') {
+      this.messageBuilder = new MessageBuilder('final-response');
+    }
+  }
+
+  private finishSection() {
+    if (!this.currentSection) return;
+
+    if (this.currentSection === 'REQUEST BODY') {
+      this.trace.clientRequest = humanizeRequestBody(this.sectionLines.join('\n'));
+    }
+
+    if (this.messageBuilder) {
+      const message = this.messageBuilder.finish();
+
+      if (this.currentSection === 'RESPONSE') {
+        this.trace.response = message;
+      } else if (this.currentAttempt !== undefined) {
+        const attempt =
+          this.attempts.get(this.currentAttempt) ?? { index: this.currentAttempt };
+        if (this.currentSection.startsWith('API REQUEST ')) attempt.request = message;
+        if (this.currentSection.startsWith('API RESPONSE ')) attempt.response = message;
+        this.attempts.set(this.currentAttempt, attempt);
+      }
+    }
+
+    this.currentSection = '';
+    this.sectionLines = [];
+    this.currentAttempt = undefined;
+    this.messageBuilder = undefined;
+  }
+}
+
+export const parseRequestLog = (raw: string): ParsedRequestLog => {
+  const parser = new IncrementalRequestLogParser();
+  parser.push(raw);
+  return parser.finish();
+};
+
+export const parseRequestLogData = async (data: unknown): Promise<ParsedRequestLog> => {
+  const parser = new IncrementalRequestLogParser();
+
+  if (data instanceof Blob) {
+    const reader = data.stream().getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.push(decoder.decode(value, { stream: true }));
+    }
+
+    parser.push(decoder.decode());
+    return parser.finish();
+  }
+
+  if (data instanceof ArrayBuffer) {
+    parser.push(new TextDecoder().decode(data));
+    return parser.finish();
+  }
+
+  if (typeof data === 'string') {
+    parser.push(data);
+    return parser.finish();
+  }
+
+  if (data !== null && data !== undefined) {
+    try {
+      parser.push(JSON.stringify(data));
+    } catch {
+      parser.push(String(data));
+    }
+  }
+
+  return parser.finish();
 };
