@@ -82,7 +82,7 @@ function HeadersDetails({ headers }: { headers: RequestLogHeader[] }) {
   if (headers.length === 0) return null;
 
   return (
-    <details className={styles.details}>
+    <details className={styles.details} open>
       <summary>Headers ({headers.length})</summary>
       <div className={styles.headers}>
         {headers.map((header, index) => (
