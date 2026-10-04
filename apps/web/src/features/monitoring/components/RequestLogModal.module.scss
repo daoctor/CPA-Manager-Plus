@@ -399,6 +399,57 @@
   text-align: right;
 }
 
+
+.emptyInline {
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.bodySection {
+  min-width: 0;
+  padding-top: $spacing-sm;
+}
+
+.readableBlock {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.messageBubble {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+  border-radius: $radius-md;
+  background: color-mix(in srgb, var(--surface-subtle) 82%, var(--bg-primary));
+  color: var(--text-primary);
+}
+
+.messageRole {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.messageText {
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 @include mobile {
   .metaGrid,
   .headerRow {
