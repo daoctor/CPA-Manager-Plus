@@ -8,6 +8,7 @@ export type RequestLogHeader = {
 export type RequestLogUsage = {
   inputTokens?: number;
   cachedTokens?: number;
+  cacheCreationTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
   totalTokens?: number;
@@ -115,16 +116,61 @@ const normalizeUsage = (value: unknown): RequestLogUsage | undefined => {
   const inputDetails = asRecord(usage.input_tokens_details) ?? asRecord(usage.prompt_tokens_details);
   const outputDetails =
     asRecord(usage.output_tokens_details) ?? asRecord(usage.completion_tokens_details);
+  const cacheCreation = asRecord(usage.cache_creation);
+  const cacheCreation5m = readNumber(cacheCreation?.ephemeral_5m_input_tokens);
+  const cacheCreation1h = readNumber(cacheCreation?.ephemeral_1h_input_tokens);
+  const cacheCreationTokens = firstDefinedNumber(
+    usage.cache_creation_input_tokens,
+    cacheCreation5m === undefined && cacheCreation1h === undefined
+      ? undefined
+      : (cacheCreation5m ?? 0) + (cacheCreation1h ?? 0)
+  );
 
   const normalized: RequestLogUsage = {
     inputTokens: firstDefinedNumber(usage.input_tokens, usage.prompt_tokens),
-    cachedTokens: firstDefinedNumber(inputDetails?.cached_tokens),
+    cachedTokens: firstDefinedNumber(usage.cache_read_input_tokens, inputDetails?.cached_tokens),
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
     outputTokens: firstDefinedNumber(usage.output_tokens, usage.completion_tokens),
     reasoningTokens: firstDefinedNumber(outputDetails?.reasoning_tokens),
     totalTokens: firstDefinedNumber(usage.total_tokens),
   };
 
   return Object.values(normalized).some((entry) => entry !== undefined) ? normalized : undefined;
+};
+
+// SSE usage events carry cumulative counters and often omit fields found on earlier events.
+const mergeUsage = (
+  current: RequestLogUsage | undefined,
+  next: RequestLogUsage | undefined
+): RequestLogUsage | undefined => {
+  if (!next) return current;
+  const merged = { ...current };
+  for (const field of Object.keys(next) as (keyof RequestLogUsage)[]) {
+    const value = next[field];
+    if (value !== undefined) merged[field] = value;
+  }
+  return merged;
+};
+
+// Claude's input_tokens excludes cache read/write tokens, unlike OpenAI's input_tokens.
+// Never add the cached subset to an OpenAI total.
+const withAnthropicTotal = (usage: RequestLogUsage | undefined): RequestLogUsage | undefined => {
+  if (
+    !usage ||
+    usage.totalTokens !== undefined ||
+    usage.inputTokens === undefined ||
+    usage.outputTokens === undefined
+  ) {
+    return usage;
+  }
+  return {
+    ...usage,
+    totalTokens:
+      usage.inputTokens +
+      (usage.cachedTokens ?? 0) +
+      (usage.cacheCreationTokens ?? 0) +
+      usage.outputTokens,
+  };
 };
 
 const extractText = (value: unknown): string => {
@@ -305,9 +351,13 @@ const extractAnthropicContent = (root: JsonRecord) => {
     const block = asRecord(rawBlock);
     if (!block) continue;
     const text = readString(block.text);
-    if (!text) continue;
-    if (block.type === 'thinking') reasoning += text;
-    if (block.type === 'text') content += text;
+    if (block.type === 'thinking' && text) reasoning += text;
+    if (block.type === 'text' && text) content += text;
+    if (block.type === 'tool_use') {
+      const name = readString(block.name) ?? 'unknown';
+      const input = JSON.stringify(block.input ?? {}, null, 2);
+      content += (content ? '\n\n' : '') + '[Tool: ' + name + ']\n' + input;
+    }
   }
 
   return { reasoning, content };
@@ -363,17 +413,34 @@ export const humanizeResponseBody = (body: string): RequestLogReadableResponse =
     reasoning,
     content,
     finishReason,
-    usage: normalizeUsage(root.usage),
+    usage: root.type === 'message'
+      ? withAnthropicTotal(normalizeUsage(root.usage))
+      : normalizeUsage(root.usage),
   };
 };
 
 class StreamSummaryBuilder {
   private currentEvent = '';
+  private isAnthropic = false;
+  private anthroCompleted = false;
+  private toolCalls = new Map<number, { name: string; input: unknown; partialJson: string }>();
 
   readonly summary: RequestLogReadableResponse = {
     reasoning: '',
     content: '',
   };
+
+  private flushToolCall(index: number) {
+    const tool = this.toolCalls.get(index);
+    if (!tool) return;
+    const args = tool.partialJson
+      ? (tryParseJson(tool.partialJson) ?? tool.partialJson)
+      : tool.input;
+    const readableArgs = typeof args === 'string' ? args : JSON.stringify(args ?? {}, null, 2);
+    this.summary.content +=
+      (this.summary.content ? '\n\n' : '') + '[Tool: ' + tool.name + ']\n' + readableArgs;
+    this.toolCalls.delete(index);
+  }
 
   consume(line: string) {
     if (!line) {
@@ -387,8 +454,10 @@ class StreamSummaryBuilder {
     }
 
     if (line.startsWith(': xai-usage ')) {
-      const usage = normalizeUsage(tryParseJson(line.slice(': xai-usage '.length)));
-      if (usage) this.summary.usage = usage;
+      this.summary.usage = mergeUsage(
+        this.summary.usage,
+        normalizeUsage(tryParseJson(line.slice(': xai-usage '.length)))
+      );
       return;
     }
 
@@ -407,7 +476,57 @@ class StreamSummaryBuilder {
     }
 
     const event = readString(payload.type) ?? this.currentEvent;
-    if (event === 'response.reasoning_summary_text.delta') {
+    const message = asRecord(payload.message);
+    const delta = asRecord(payload.delta);
+    const response = asRecord(payload.response);
+
+    if (
+      event === 'message_start' ||
+      event === 'content_block_start' ||
+      event === 'content_block_delta' ||
+      event === 'content_block_stop' ||
+      event === 'message_delta' ||
+      event === 'message_stop'
+    ) {
+      this.isAnthropic = true;
+    }
+
+    if (event === 'message_start') {
+      this.summary.finishReason = readString(message?.stop_reason) ?? this.summary.finishReason;
+    } else if (event === 'content_block_start') {
+      const block = asRecord(payload.content_block);
+      if (block?.type === 'text') {
+        this.summary.content = appendText(this.summary.content, block.text);
+      } else if (block?.type === 'thinking') {
+        this.summary.reasoning = appendText(this.summary.reasoning, block.thinking);
+      } else if (block?.type === 'tool_use' || block?.type === 'server_tool_use') {
+        const index = readNumber(payload.index);
+        if (index !== undefined) {
+          this.toolCalls.set(index, {
+            name: readString(block.name) ?? 'unknown',
+            input: block.input ?? {},
+            partialJson: '',
+          });
+        }
+      }
+    } else if (event === 'content_block_delta') {
+      if (delta?.type === 'text_delta') {
+        this.summary.content = appendText(this.summary.content, delta.text);
+      } else if (delta?.type === 'thinking_delta') {
+        this.summary.reasoning = appendText(this.summary.reasoning, delta.thinking);
+      } else if (delta?.type === 'input_json_delta') {
+        const index = readNumber(payload.index);
+        const tool = index === undefined ? undefined : this.toolCalls.get(index);
+        if (tool) tool.partialJson = appendText(tool.partialJson, delta.partial_json);
+      }
+    } else if (event === 'content_block_stop') {
+      const index = readNumber(payload.index);
+      if (index !== undefined) this.flushToolCall(index);
+    } else if (event === 'message_delta') {
+      this.summary.finishReason = readString(delta?.stop_reason) ?? this.summary.finishReason;
+    } else if (event === 'message_stop') {
+      this.anthroCompleted = true;
+    } else if (event === 'response.reasoning_summary_text.delta') {
       this.summary.reasoning = appendText(this.summary.reasoning, payload.delta);
     } else if (event === 'response.output_text.delta') {
       this.summary.content = appendText(this.summary.content, payload.delta);
@@ -418,16 +537,20 @@ class StreamSummaryBuilder {
       if (choice.finishReason) this.summary.finishReason = choice.finishReason;
     }
 
-    const response = asRecord(payload.response);
     this.summary.model =
-      readString(payload.model) ?? readString(response?.model) ?? this.summary.model;
+      readString(message?.model) ??
+      readString(payload.model) ??
+      readString(response?.model) ??
+      this.summary.model;
     this.summary.serviceTier =
       readString(payload.service_tier) ??
       readString(response?.service_tier) ??
       this.summary.serviceTier;
 
-    const usage = normalizeUsage(response?.usage) ?? normalizeUsage(payload.usage);
-    if (usage) this.summary.usage = usage;
+    this.summary.usage = mergeUsage(
+      mergeUsage(this.summary.usage, normalizeUsage(message?.usage)),
+      normalizeUsage(response?.usage) ?? normalizeUsage(payload.usage)
+    );
 
     if (event === 'response.completed' && response) {
       const completed = extractResponsesOutput(response);
@@ -436,6 +559,14 @@ class StreamSummaryBuilder {
     }
 
     this.currentEvent = '';
+  }
+
+  finish(): RequestLogReadableResponse {
+    for (const index of Array.from(this.toolCalls.keys())) this.flushToolCall(index);
+    if (this.isAnthropic && this.anthroCompleted) {
+      this.summary.usage = withAnthropicTotal(this.summary.usage);
+    }
+    return this.summary;
   }
 }
 
@@ -517,7 +648,7 @@ class MessageBuilder {
     return {
       meta: this.meta,
       headers: this.headers,
-      response: this.stream?.summary ?? humanizeResponseBody(body),
+      response: this.stream?.finish() ?? humanizeResponseBody(body),
     };
   }
 

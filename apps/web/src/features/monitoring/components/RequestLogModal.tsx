@@ -103,6 +103,9 @@ function UsageGrid({ usage }: { usage?: RequestLogUsage }) {
     <div className={styles.usageGrid}>
       <StatCard label="Input" value={usage.inputTokens ?? '—'} />
       <StatCard label="Cached" value={usage.cachedTokens ?? '—'} />
+      {usage.cacheCreationTokens !== undefined ? (
+        <StatCard label="Cache Write" value={usage.cacheCreationTokens} />
+      ) : null}
       <StatCard label="Output" value={usage.outputTokens ?? '—'} />
       <StatCard label="Reasoning" value={usage.reasoningTokens ?? '—'} />
       <StatCard label="Total" value={usage.totalTokens ?? '—'} />
