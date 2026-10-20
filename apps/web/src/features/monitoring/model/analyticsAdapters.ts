@@ -1091,6 +1091,7 @@ export const buildUsageDetailsFromAnalyticsEvents = (
       access_token_sha256: readString(item.access_token_sha256),
       generate: typeof item.generate === 'boolean' ? item.generate : undefined,
       stream: typeof item.stream === 'boolean' ? item.stream : undefined,
+      __requestId: readString(item.request_id),
       __modelName: analyticsModel,
       __requestedModel: requestedModel,
       __resolvedModel: readString(item.resolved_model),

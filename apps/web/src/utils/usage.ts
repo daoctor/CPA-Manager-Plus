@@ -265,6 +265,7 @@ export interface UsageDetail {
   __requestedModel?: string;
   __resolvedModel?: string;
   __responseModel?: string;
+  __requestId?: string;
   __timestampMs?: number;
 }
 
