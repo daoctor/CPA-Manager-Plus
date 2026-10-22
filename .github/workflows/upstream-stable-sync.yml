@@ -119,9 +119,9 @@ jobs:
         if: steps.inspect.outputs.changed == 'true'
         id: merge
         env:
-          OLD_SHA: ${ steps.inspect.outputs.old_sha }}
-          UPSTREAM_SHA: ${ steps.inspect.outputs.upstream_sha }}
-          MERGE_BASE: ${ steps.inspect.outputs.base_sha }}
+          OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
+          UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+          MERGE_BASE: ${{ steps.inspect.outputs.base_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -231,10 +231,10 @@ jobs:
         if: steps.inspect.outputs.changed == 'true'
         id: push
         env:
-          GH_TOKEN: ${ github.token }}
-          OLD_SHA: ${ steps.inspect.outputs.old_sha }}
-          UPSTREAM_SHA: ${ steps.inspect.outputs.upstream_sha }}
-          MERGED_SHA: ${ steps.merge.outputs.merged_sha }}
+          GH_TOKEN: ${{ github.token }}
+          OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
+          UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+          MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -257,8 +257,8 @@ jobs:
         if: steps.push.outputs.new_sha != ''
         id: dispatch
         env:
-          GH_TOKEN: ${ github.token }}
-          NEW_SHA: ${ steps.push.outputs.new_sha }}
+          GH_TOKEN: ${{ github.token }}
+          NEW_SHA: ${{ steps.push.outputs.new_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -269,8 +269,8 @@ jobs:
         if: steps.dispatch.outputs.started == 'true'
         id: verify
         env:
-          GH_TOKEN: ${ github.token }}
-          NEW_SHA: ${ steps.push.outputs.new_sha }}
+          GH_TOKEN: ${{ github.token }}
+          NEW_SHA: ${{ steps.push.outputs.new_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -293,12 +293,12 @@ jobs:
       - name: Notify successful sync via assigned GitHub Issue
         if: success() && steps.inspect.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${ github.token }}
-          NEW_SHA: ${ steps.push.outputs.new_sha }}
-          UP_SHA: ${ steps.inspect.outputs.upstream_sha }}
-          COUNT: ${ steps.inspect.outputs.commit_count }}
-          VERSION: ${ steps.inspect.outputs.release }}
-          PUBLISH_URL: ${ steps.verify.outputs.publish_url }}
+          GH_TOKEN: ${{ github.token }}
+          NEW_SHA: ${{ steps.push.outputs.new_sha }}
+          UP_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+          COUNT: ${{ steps.inspect.outputs.commit_count }}
+          VERSION: ${{ steps.inspect.outputs.release }}
+          PUBLISH_URL: ${{ steps.verify.outputs.publish_url }}
         shell: bash
         run: |
           set -euo pipefail
@@ -311,19 +311,19 @@ jobs:
       - name: Notify failures via assigned GitHub Issue
         if: failure()
         env:
-          GH_TOKEN: ${ github.token }}
-          INSPECT: ${ steps.inspect.outcome }}
-          MERGE: ${ steps.merge.outcome }}
-          FRONTEND: ${ steps.frontend.outcome }}
-          MANAGER: ${ steps.manager.outcome }}
-          DOCKER: ${ steps.docker.outcome }}
-          PUSH: ${ steps.push.outcome }}
-          DISPATCH: ${ steps.dispatch.outcome }}
-          VERIFY: ${ steps.verify.outcome }}
-          OLD_SHA: ${ steps.inspect.outputs.old_sha }}
-          UPSTREAM_SHA: ${ steps.inspect.outputs.upstream_sha }}
-          NEW_SHA: ${ steps.push.outputs.new_sha }}
-          PUBLISH_URL: ${ steps.verify.outputs.publish_url }}
+          GH_TOKEN: ${{ github.token }}
+          INSPECT: ${{ steps.inspect.outcome }}
+          MERGE: ${{ steps.merge.outcome }}
+          FRONTEND: ${{ steps.frontend.outcome }}
+          MANAGER: ${{ steps.manager.outcome }}
+          DOCKER: ${{ steps.docker.outcome }}
+          PUSH: ${{ steps.push.outcome }}
+          DISPATCH: ${{ steps.dispatch.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+          OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
+          UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+          NEW_SHA: ${{ steps.push.outputs.new_sha }}
+          PUBLISH_URL: ${{ steps.verify.outputs.publish_url }}
         shell: bash
         run: |
           set -euo pipefail
