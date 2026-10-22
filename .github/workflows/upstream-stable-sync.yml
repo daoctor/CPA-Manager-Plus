@@ -2,12 +2,6 @@ name: CPA Manager Plus - Upstream Stable Sync
 run-name: "Stable upstream sync to feat/request-log-viewer"
 
 on:
-  # Also run once when this automation definition changes, for a real integration test.
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/upstream-stable-sync.yml'
   schedule:
     - cron: '0 1 * * *' # 09:00 Asia/Singapore, UTC+08:00 year-round
   workflow_dispatch:
@@ -16,7 +10,7 @@ on:
 permissions:
   contents: write
   actions: write
-  issues: write
+  pull-requests: write
 
 concurrency:
   group: cpa-manager-plus-upstream-stable-sync
@@ -290,7 +284,7 @@ jobs:
           gh run view "$run_id" -R "$GITHUB_REPOSITORY" --json status,conclusion \
             --jq 'if .status == "completed" and .conclusion == "success" then "Publisher and GHCR digest verification passed" else error("Publisher failed") end'
 
-      - name: Notify successful sync via assigned GitHub Issue
+      - name: Notify successful sync via PR #1 comment
         if: success() && steps.inspect.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -302,13 +296,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notes="$(gh api repos/seakee/CPA-Manager-Plus/releases/latest --jq .body | head -n 32)"
+          notes="$(gh api repos/seakee/CPA-Manager-Plus/releases/latest --jq .body | sed -n '1,32p')"
           body="$(printf 'Upstream stable main: %s (%s)\nNew commits synchronized: %s\nMerge conflicts: none; fork Request Log/Claude SSE customizations preserved.\nNew merge commit: %s\nCI: TypeScript PASS, ESLint PASS, frontend tests PASS, frontend build PASS, Manager Server tests PASS, Docker CI build PASS.\nGHCR: sha-%s and preview tags published and verified with matching real registry digests.\nImages:\n- %s:preview\n- %s:sha-%s\nBuild and GHCR verification run: %s\nSync workflow: https://github.com/%s/actions/runs/%s\n\nRelease notes / upgrade considerations:\n%s\n' "$VERSION" "$UP_SHA" "$COUNT" "$NEW_SHA" "$NEW_SHA" "$IMAGE" "$IMAGE" "$NEW_SHA" "$PUBLISH_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$notes")"
-          gh issue create -R "$GITHUB_REPOSITORY" --assignee daoctor \
-            --title "Upstream sync successful: $VERSION ($NEW_SHA)" \
-            --body "$body" || echo "::warning::Could not post a success Issue; inspect this Actions run"
+          gh pr comment 1 -R "$GITHUB_REPOSITORY" --body "$(printf '@daoctor\n\n%s' "$body")"
 
-      - name: Notify failures via assigned GitHub Issue
+      - name: Notify failures via PR #1 comment
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -332,6 +324,4 @@ jobs:
             [[ "$entry" != *":failure" ]] || failed="$failed $entry"
           done
           body="$(printf 'CPA upstream auto-sync stopped. Failing stages:%s\nUpstream main SHA: %s\nFeature SHA before run: %s\nNew feature SHA if already pushed: %s\nSafety: no force push, no main change, no PR #1 merge, no production deployment.\nCheck the exact failing step and error log:\nhttps://github.com/%s/actions/runs/%s\nPublisher run if dispatched: %s\nAction required: inspect the logs, review compatibility/conflicts or permissions, and retry via workflow_dispatch after resolving the issue.\n' "$failed" "$UPSTREAM_SHA" "$OLD_SHA" "$NEW_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$PUBLISH_URL")"
-          gh issue create -R "$GITHUB_REPOSITORY" --assignee daoctor \
-            --title "Upstream sync failed: Actions run $GITHUB_RUN_ID" \
-            --body "$body" || echo "::warning::Issue notification failed; review this run"
+          gh pr comment 1 -R "$GITHUB_REPOSITORY" --body "$(printf '@daoctor\n\n%s' "$body")"
