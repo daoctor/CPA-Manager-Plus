@@ -2,6 +2,12 @@ name: CPA Manager Plus - Upstream Stable Sync
 run-name: "Stable upstream sync to feat/request-log-viewer"
 
 on:
+  # Also run once when this automation definition changes, for a real integration test.
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/upstream-stable-sync.yml'
   schedule:
     - cron: '0 1 * * *' # 09:00 Asia/Singapore, UTC+08:00 year-round
   workflow_dispatch:
@@ -36,6 +42,8 @@ jobs:
 
       - name: Check upstream main, release notes, and high-risk changes
         id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -69,8 +77,7 @@ jobs:
 
           # Only upstream stable main. Latest release is informational and also a
           # machine-readable migration/breaking-change safety signal.
-          release="$(curl --fail --location --silent --show-error --retry 3 \
-            https://api.github.com/repos/seakee/CPA-Manager-Plus/releases/latest)"
+          release="$(gh api repos/seakee/CPA-Manager-Plus/releases/latest)"
           version="$(jq -r '.tag_name // ""' <<<"$release")"
           [[ -n "$version" && "$(jq -r '.draft' <<<"$release")" == "false" && "$(jq -r '.prerelease' <<<"$release")" == "false" ]] || {
             echo "::error::Cannot verify latest stable release"; exit 1;
