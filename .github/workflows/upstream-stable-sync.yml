@@ -1,9 +1,9 @@
 name: CPA Manager Plus - Upstream Stable Sync
 run-name: "Stable upstream sync to feat/request-log-viewer"
 
+# Automatic daily upstream sync is paused by user request (2026-10-26).
+# Only explicit manual workflow_dispatch remains available.
 on:
-  schedule:
-    - cron: '0 1 * * *' # 09:00 Asia/Singapore, UTC+08:00 year-round
   workflow_dispatch:
 
 # Only modifies the feature branch; never merges PR #1 or pushes to main.
