@@ -7,6 +7,12 @@ on:
   schedule:
     - cron: '0 1 * * *' # 09:00 Asia/Singapore (UTC+8)
   workflow_dispatch:
+  # One-time GitHub Actions real-run validation after workflow-token setup.
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/upstream-stable-sync.yml'
 
 # Only modifies the feature branch; never merges PR #1 or pushes to main.
 permissions:
