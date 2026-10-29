@@ -13,6 +13,7 @@ permissions:
   contents: write
   actions: write
   pull-requests: write
+  packages: read # only for verifying published GHCR tag digests
 
 concurrency:
   group: cpa-manager-plus-upstream-stable-sync
@@ -293,6 +294,7 @@ jobs:
         id: push
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
           OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
           UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
           MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
@@ -313,9 +315,16 @@ jobs:
           new_remote="$(git ls-remote origin "refs/heads/$TARGET" | cut -f1)"
           [[ "$new_remote" == "$MERGED_SHA" ]] || { echo "::error::Remote SHA not equal to merged commit"; exit 1; }
           echo "new_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
+          if [[ -n "$UPSTREAM_SYNC_TOKEN" ]]; then
+            echo "used_pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "used_pat=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Explicitly dispatch existing fork-image.yml publisher on main
-        if: steps.push.outputs.new_sha != ''
+      # A scoped PAT triggers feat/** push workflows automatically.
+      # GITHUB_TOKEN does not, so only that path needs explicit dispatch.
+      - name: Dispatch SHA-pinned publisher only for GITHUB_TOKEN pushes
+        if: steps.push.outputs.new_sha != '' && steps.push.outputs.used_pat != 'true'
         id: dispatch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -326,30 +335,70 @@ jobs:
           gh workflow run fork-image.yml -R "$GITHUB_REPOSITORY" --ref main -f "source_sha=$NEW_SHA"
           echo "started=true" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for real Docker publish, GHCR digest checks and conclusion
-        if: steps.dispatch.outputs.started == 'true'
+      - name: Verify actual Fork Image run and published GHCR tags
+        if: steps.push.outputs.new_sha != ''
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ github.token }}
           NEW_SHA: ${{ steps.push.outputs.new_sha }}
+          USED_PAT: ${{ steps.push.outputs.used_pat }}
         shell: bash
         run: |
           set -euo pipefail
           run_id=""
           for attempt in $(seq 1 45); do
-            run_id="$(gh run list -R "$GITHUB_REPOSITORY" \
-              --workflow fork-image.yml --event workflow_dispatch --limit 60 \
-              --json databaseId,displayTitle \
-              --jq ".[] | select(.displayTitle == \"Fork Image preview $NEW_SHA\") | .databaseId" | head -n 1)"
-            if [[ -n "$run_id" ]]; then break; fi
+            if [[ "$USED_PAT" == "true" ]]; then
+              # PAT-authored push triggers the feature branch's own Fork Image
+              # workflow, which publishes preview + SHA tags in one action.
+              run_id="$(gh run list -R "$GITHUB_REPOSITORY" \
+                --workflow fork-image.yml --event push --branch "$TARGET" --limit 60 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$NEW_SHA\") | .databaseId" | head -n 1)"
+            else
+              # Default GITHUB_TOKEN pushes cannot trigger a second workflow:
+              # use the SHA-pinned publisher on main instead.
+              run_id="$(gh run list -R "$GITHUB_REPOSITORY" \
+                --workflow fork-image.yml --event workflow_dispatch --limit 60 \
+                --json databaseId,displayTitle \
+                --jq ".[] | select(.displayTitle == \"Fork Image preview $NEW_SHA\") | .databaseId" | head -n 1)"
+            fi
+            [[ -z "$run_id" ]] || break
             sleep 10
           done
-          [[ -n "$run_id" ]] || { echo "::error::Publisher run was not created or could not be found"; exit 1; }
-          echo "publish_url=https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_OUTPUT"
-          echo "Publisher: https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          [[ -n "$run_id" ]] || { echo "::error::No Fork Image run found for commit $NEW_SHA"; exit 1; }
+          url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          echo "publish_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Monitoring publisher: $url"
           timeout 5400 gh run watch "$run_id" -R "$GITHUB_REPOSITORY" --exit-status
           gh run view "$run_id" -R "$GITHUB_REPOSITORY" --json status,conclusion \
-            --jq 'if .status == "completed" and .conclusion == "success" then "Publisher and GHCR digest verification passed" else error("Publisher failed") end'
+            --jq 'if .status == "completed" and .conclusion == "success" then "Fork Image succeeded" else error("Fork Image did not succeed") end'
+
+          if [[ "$USED_PAT" == "true" ]]; then
+            # The feature branch's original workflow must have truly pushed.
+            push_step="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=50" \
+              --jq '.jobs[] | select(.name == "Build Docker image") | .steps[] | select(.name == "Build and push preview image") | .conclusion')"
+            [[ "$push_step" == "success" ]] || {
+              echo "::error::No successful GHCR push step in feature Fork Image workflow."
+              exit 1
+            }
+          fi
+
+          # Verify the actual registry tags, not just an in-progress Actions job.
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          fixed=""
+          moving=""
+          for attempt in $(seq 1 10); do
+            fixed="$(docker buildx imagetools inspect "$IMAGE:sha-$NEW_SHA" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+            moving="$(docker buildx imagetools inspect "$IMAGE:preview" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+            if [[ "$fixed" =~ ^sha256:[a-f0-9]{64}$ && "$moving" == "$fixed" ]]; then break; fi
+            sleep 10
+          done
+          [[ "$fixed" =~ ^sha256:[a-f0-9]{64}$ && "$moving" == "$fixed" ]] || {
+            echo "::error::GHCR preview and sha-$NEW_SHA tags are missing or have different digests."
+            exit 1
+          }
+          echo "Verified GHCR preview + sha-$NEW_SHA at $fixed"
 
       - name: Notify successful sync via PR #1 comment
         if: success() && steps.inspect.outputs.changed == 'true'
