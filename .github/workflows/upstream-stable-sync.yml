@@ -40,6 +40,7 @@ jobs:
         id: inspect
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -136,6 +137,15 @@ jobs:
           # front-end, Go, audit, Compose and Docker builds before any push.
           if grep -Ei '(^|/)(Dockerfile[^/]*|go[.]mod|go[.]sum|package(-lock)?[.]json)$|(^|/)[.]github/workflows/' "$RUNNER_TEMP/upstream-files.txt"; then
             echo "::notice::Toolchain/CI dependencies changed; full pre-push regression checks are required."
+          fi
+
+          # GitHub's default GITHUB_TOKEN cannot update .github/workflows.
+          # An opt-in scoped token is required whenever upstream main changes
+          # workflows, without modifying the merge tree or discarding history.
+          if grep -Eq '^\.github/workflows/' "$RUNNER_TEMP/upstream-files.txt" && [[ -z "$UPSTREAM_SYNC_TOKEN" ]]; then
+            echo "fail_reason=missing_workflow_token" >> "$GITHUB_OUTPUT"
+            echo "::error::Upstream changes workflows. Configure Actions secret UPSTREAM_SYNC_TOKEN with Contents: write + Workflows: write, scoped to this fork."
+            exit 1
           fi
 
           comm -12 <(LC_ALL=C sort "$RUNNER_TEMP/upstream-files.txt") <(LC_ALL=C sort "$RUNNER_TEMP/fork-files.txt") > "$RUNNER_TEMP/overlap.txt"
@@ -243,7 +253,7 @@ jobs:
           npm run check:demo-isolation
           npm run check:web-icons
 
-      - name: Set up Go 1.24
+      - name: Set up Go from go.mod
         if: steps.inspect.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -282,7 +292,7 @@ jobs:
         if: steps.inspect.outputs.changed == 'true'
         id: push
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
           UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
           MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
@@ -361,6 +371,7 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          FAIL_REASON: ${{ steps.inspect.outputs.fail_reason }}
           INSPECT: ${{ steps.inspect.outcome }}
           MERGE: ${{ steps.merge.outcome }}
           FRONTEND: ${{ steps.frontend.outcome }}
@@ -381,4 +392,14 @@ jobs:
             [[ "$entry" != *":failure" ]] || failed="$failed $entry"
           done
           body="$(printf 'CPA upstream auto-sync stopped. Failing stages:%s\nUpstream main SHA: %s\nFeature SHA before run: %s\nNew feature SHA if already pushed: %s\nSafety: no force push, no main change, no PR #1 merge, no production deployment.\nCheck the exact failing step and error log:\nhttps://github.com/%s/actions/runs/%s\nPublisher run if dispatched: %s\nAction required: inspect the logs, review compatibility/conflicts or permissions, and retry via workflow_dispatch after resolving the issue.\n' "$failed" "$UPSTREAM_SHA" "$OLD_SHA" "$NEW_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$PUBLISH_URL")"
+          # If the missing workflow token is already reported for this same
+          # upstream SHA, do not repeat the same alert every single day.
+          if [[ "$FAIL_REASON" == "missing_workflow_token" && -n "$UPSTREAM_SHA" ]]; then
+            marker="<!-- cpa-upstream-token-required:$UPSTREAM_SHA -->"
+            if gh api "repos/$GITHUB_REPOSITORY/issues/1/comments?per_page=100" --jq '.[].body' | grep -Fq "$marker"; then
+              echo "Credential blocker already reported for $UPSTREAM_SHA; no duplicate comment."
+              exit 0
+            fi
+            body="$marker"$'\n'"$body"
+          fi
           gh pr comment 1 -R "$GITHUB_REPOSITORY" --body "$(printf '@daoctor\n\n%s' "$body")"
