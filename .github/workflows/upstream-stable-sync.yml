@@ -1,17 +1,12 @@
 name: CPA Manager Plus - Upstream Stable Sync
 run-name: "Stable upstream sync to feat/request-log-viewer"
 
-# Restored on 2026-10-29 by user request. The temporary push hook tests
-# this definition once; daily schedule and manual dispatch remain supported.
+# Daily stable upstream synchronization (Asia/Singapore 09:00).
+# Manual workflow_dispatch remains available for explicit retries.
 on:
   schedule:
     - cron: '0 1 * * *' # 09:00 Asia/Singapore (UTC+8)
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/upstream-stable-sync.yml'
 
 # Only modifies the feature branch; never merges PR #1 or pushes to main.
 permissions:
