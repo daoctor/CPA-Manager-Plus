@@ -1,10 +1,17 @@
 name: CPA Manager Plus - Upstream Stable Sync
 run-name: "Stable upstream sync to feat/request-log-viewer"
 
-# Automatic daily upstream sync is paused by user request (2026-10-26).
-# Only explicit manual workflow_dispatch remains available.
+# Restored on 2026-10-29 by user request. The temporary push hook tests
+# this definition once; daily schedule and manual dispatch remain supported.
 on:
+  schedule:
+    - cron: '0 1 * * *' # 09:00 Asia/Singapore (UTC+8)
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/upstream-stable-sync.yml'
 
 # Only modifies the feature branch; never merges PR #1 or pushes to main.
 permissions:
@@ -88,11 +95,43 @@ jobs:
           echo "Upstream changed paths:"
           cat "$RUNNER_TEMP/upstream-files.txt"
 
-          # Fail closed on infrastructure, API/configuration, database, dependencies
-          # and workflow changes that could demand operator action.
-          if grep -Ei '(^|/)(migrations?|schema|database)(/|[._-])|(^|/)(Dockerfile[^/]*|docker-compose[^/]*|compose[.]ya?ml)$|(^|/)([.]env[^/]*|config[.][^/]*)$|(^|/)[.]github/workflows/|(^|/)(package(-lock)?[.]json|go[.]mod|go[.]sum|pnpm-lock[.]yaml)$|^apps/manager-server/' "$RUNNER_TEMP/upstream-files.txt"; then
-            echo "::error::Risk-sensitive upstream files changed. Require manual compatibility review before any push."
+          # Fail closed on migrations/schema writes and secret/env files. A routine
+          # Dockerfile, Go, npm, workflow or Manager Server change is not by itself
+          # a breaking migration: test those normally, after reviewing release metadata.
+          if grep -Ei '(^|/)(migrations?|schema)(/|[._-])|[.]sql$|^apps/manager-server/internal/repository/(sqlite|migrations?)/|(^|/)([.]env[^/]*|secrets[^/]*)$' "$RUNNER_TEMP/upstream-files.txt"; then
+            echo "::error::Upstream changed persisted schema, migration, secrets or env files; manual review required before merge."
             exit 1
+          fi
+
+          # Evaluate *every* intervening stable release, not only the latest.
+          # A missing machine-readable safety declaration also fails closed.
+          release_notes_checked=0
+          while IFS= read -r release_path; do
+            case "$release_path" in
+              docs/release-notes/v*-en.md)
+                note="$(git show "$upstream_sha:$release_path")" || {
+                  echo "::error::Could not read upstream release note: $release_path"; exit 1;
+                }
+                for flag in breaking migration_required; do
+                  if ! grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*false" <<<"$note"; then
+                    echo "::error::Missing false declaration for $flag in $release_path; manual review required."
+                    exit 1
+                  fi
+                done
+                release_notes_checked=$((release_notes_checked + 1))
+                ;;
+            esac
+          done < "$RUNNER_TEMP/upstream-files.txt"
+          if (( release_notes_checked == 0 )); then
+            echo "::error::No versioned upstream release notes in new stable main commits; manual review required."
+            exit 1
+          fi
+          echo "Validated $release_notes_checked intervening stable releases: no declared breaking changes or DB migration."
+
+          # Changes to Docker, Go and npm dependences are exercised by full
+          # front-end, Go, audit, Compose and Docker builds before any push.
+          if grep -Ei '(^|/)(Dockerfile[^/]*|go[.]mod|go[.]sum|package(-lock)?[.]json)$|(^|/)[.]github/workflows/' "$RUNNER_TEMP/upstream-files.txt"; then
+            echo "::notice::Toolchain/CI dependencies changed; full pre-push regression checks are required."
           fi
 
           comm -12 <(LC_ALL=C sort "$RUNNER_TEMP/upstream-files.txt") <(LC_ALL=C sort "$RUNNER_TEMP/fork-files.txt") > "$RUNNER_TEMP/overlap.txt"
@@ -141,6 +180,19 @@ jobs:
             fi
           done < <(git diff --diff-filter=A --name-only --no-renames "$MERGE_BASE" "$OLD_SHA")
 
+          # All other fork-modified paths must also remain byte-identical.
+          # A shared upstream/fork path is rejected above unless it is the
+          # known eventRows.ts identity extension, whose invariant is checked
+          # explicitly below and verified by the full test suite.
+          while IFS= read -r fork_path; do
+            [[ -n "$fork_path" ]] || continue
+            [[ "$fork_path" != "apps/web/src/features/monitoring/model/eventRows.ts" ]] || continue
+            if ! git cat-file -e "HEAD:$fork_path" || ! git diff --quiet "$OLD_SHA" HEAD -- "$fork_path"; then
+              echo "::error::Fork-specific change not retained exactly: $fork_path"
+              exit 1
+            fi
+          done < <(git diff --name-only --no-renames "$MERGE_BASE" "$OLD_SHA")
+
           # The fork-owned viewer and Claude SSE parser are non-negotiable.
           protected=(
             ".github/workflows/fork-image.yml"
@@ -169,7 +221,7 @@ jobs:
         if: steps.inspect.outputs.changed == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
 
       - name: TypeScript, ESLint, frontend tests, bundle build, and checks
@@ -179,6 +231,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
+          npm audit --package-lock-only --ignore-scripts
           npm run type-check
           npm run lint
           npm test
@@ -190,7 +243,7 @@ jobs:
         if: steps.inspect.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/manager-server/go.mod
           cache-dependency-path: apps/manager-server/go.sum
 
       - name: Manager Server tests
