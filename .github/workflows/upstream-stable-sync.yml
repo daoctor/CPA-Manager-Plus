@@ -103,18 +103,27 @@ jobs:
             exit 1
           fi
 
-          # Evaluate *every* intervening stable release, not only the latest.
-          # A missing machine-readable safety declaration also fails closed.
+          # Validate *each* stable release between old and new main using
+          # the machine-readable metadata embedded in the GitHub Release body.
           release_notes_checked=0
           while IFS= read -r release_path; do
             case "$release_path" in
               docs/release-notes/v*-en.md)
-                note="$(git show "$upstream_sha:$release_path")" || {
-                  echo "::error::Could not read upstream release note: $release_path"; exit 1;
+                release_tag="${release_path##*/}"
+                release_tag="${release_tag%-en.md}"
+                candidate="$(gh api "repos/seakee/CPA-Manager-Plus/releases/tags/$release_tag")" || {
+                  echo "::error::Cannot fetch stable release metadata: $release_tag"; exit 1;
                 }
+                [[ "$(jq -r '.tag_name' <<<"$candidate")" == "$release_tag" ]] || {
+                  echo "::error::Mismatched release tag: $release_tag"; exit 1;
+                }
+                [[ "$(jq -r '.draft' <<<"$candidate")" == false && "$(jq -r '.prerelease' <<<"$candidate")" == false ]] || {
+                  echo "::error::Upstream release is not stable: $release_tag"; exit 1;
+                }
+                note="$(jq -r '.body // ""' <<<"$candidate")"
                 for flag in breaking migration_required; do
                   if ! grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*false" <<<"$note"; then
-                    echo "::error::Missing false declaration for $flag in $release_path; manual review required."
+                    echo "::error::Release $release_tag lacks verified non-breaking/no-migration metadata for $flag."
                     exit 1
                   fi
                 done
